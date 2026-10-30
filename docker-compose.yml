@@ -1,0 +1,28 @@
+version: '3.9'
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: scenario
+      POSTGRES_PASSWORD: scenario_prod_password
+      POSTGRES_DB: scenario
+    ports:
+      - '5432:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  scenario-web:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    ports:
+      - '3000:3000'
+    environment:
+      DATABASE_URL: postgresql://scenario:scenario_prod_password@postgres:5432/scenario?schema=public
+      NEXTAUTH_URL: http://localhost:3000
+      NEXTAUTH_SECRET: scenario-production-hmac-secret-key-2026
+
+volumes:
+  pgdata:

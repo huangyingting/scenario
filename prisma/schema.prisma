@@ -1,0 +1,561 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+// ============================================================================
+// NEXTAUTH & IDENTITY MODELS
+// ============================================================================
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+model User {
+  id               String   @id @default(cuid())
+  email            String   @unique
+  name             String
+  passwordHash     String
+  avatarUrl        String?
+  role             String   @default("USER") // USER | ADMIN | SUPER_ADMIN
+  status           String   @default("ACTIVE") // ACTIVE | SUSPENDED | DEACTIVATED
+  currentTeamId    String?
+  currentProjectId String?
+  onboarded        Boolean  @default(true)
+  lastLoginAt      DateTime?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  accounts              Account[]
+  sessions              Session[]
+  memberships           OrganizationMember[]
+  issuedInvitations     InvitationCode[]       @relation("IssuedInvitations")
+  redeemedInvitations   InvitationRedemption[] @relation("RedeemedByUser")
+  invitationAuditEvents InvitationAuditLog[]   @relation("InvitationActor")
+  auditLogs             AuditLog[]             @relation("AuditActor")
+  models                AiModel[]
+  trainings             ModelTrainingJob[]
+  inferences            InferenceJob[]
+  assets                Asset[]
+  collections           Collection[]
+  workflows             Workflow[]
+  workflowRuns          WorkflowRun[]
+  canvases              CanvasProject[]
+  apiKeys               ApiKey[]
+  oscuTransactions      OscuTransaction[]
+}
+
+// ============================================================================
+// INVITE-ONLY ADMISSION, SINGLE-USE/EXPIRING CODES & AUDIT LOGGING
+// ============================================================================
+
+model InvitationCode {
+  id            String    @id @default(cuid())
+  code          String    @unique
+  label         String?
+  role          String    @default("USER") // USER | ADMIN | SUPER_ADMIN
+  workspaceRole String    @default("admin") // admin | editor | reader
+  targetTeamId  String?
+  boundEmail    String?
+  status        String    @default("ACTIVE") // ACTIVE | CONSUMED | EXPIRED | REVOKED
+  maxUses       Int       @default(1)
+  usedCount     Int       @default(0)
+  expiresAt     DateTime?
+  revokedAt     DateTime?
+  revokedReason String?
+  createdById   String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  createdBy   User?                  @relation("IssuedInvitations", fields: [createdById], references: [id], onDelete: SetNull)
+  redemptions InvitationRedemption[]
+  auditLogs   InvitationAuditLog[]
+
+  @@index([status])
+  @@index([boundEmail])
+}
+
+model InvitationRedemption {
+  id            String   @id @default(cuid())
+  invitationId  String
+  userId        String
+  redeemedEmail String
+  ipAddress     String?
+  userAgent     String?
+  redeemedAt    DateTime @default(now())
+
+  invitation InvitationCode @relation(fields: [invitationId], references: [id], onDelete: Cascade)
+  user       User           @relation("RedeemedByUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([invitationId])
+  @@index([userId])
+}
+
+model InvitationAuditLog {
+  id           String   @id @default(cuid())
+  invitationId String?
+  actorId      String?
+  action       String // ISSUED | VALIDATED | REDEEMED | REJECTED | ROTATED | REVOKED
+  codeAttempt  String?
+  emailAttempt String?
+  reason       String?
+  metadataJson String   @default("{}")
+  ipAddress    String?
+  createdAt    DateTime @default(now())
+
+  invitation InvitationCode? @relation(fields: [invitationId], references: [id], onDelete: SetNull)
+  actor      User?           @relation("InvitationActor", fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([invitationId])
+  @@index([action])
+  @@index([createdAt])
+}
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  actorId     String?
+  actorEmail  String?
+  teamId      String?
+  projectId   String?
+  action      String
+  targetType  String
+  targetId    String?
+  severity    String   @default("INFO") // INFO | WARN | CRITICAL
+  detailsJson String   @default("{}")
+  ipAddress   String?
+  createdAt   DateTime @default(now())
+
+  actor User? @relation("AuditActor", fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([teamId])
+  @@index([action])
+  @@index([createdAt])
+}
+
+// ============================================================================
+// MULTI-TENANT ORGANIZATIONS (TEAMS), PROJECTS & COMPUTE UNITS (OSCU)
+// ============================================================================
+
+model Organization {
+  id                  String   @id @default(cuid())
+  slug                String   @unique
+  name                String
+  logoUrl             String?
+  plan                String   @default("pro") // pro | studio | enterprise
+  seatsLimit          Int      @default(10)
+  oscuAllowance       Int      @default(15000)
+  oscuBalance         Int      @default(15000)
+  autoRefillEnabled   Boolean  @default(false)
+  autoRefillThreshold Int      @default(1000)
+  autoRefillAmount    Int      @default(5000)
+  usageAlertThreshold Int      @default(80)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  members          OrganizationMember[]
+  projects         Project[]
+  oscuBuckets      OscuBucket[]
+  oscuTransactions OscuTransaction[]
+  models           AiModel[]
+  trainings        ModelTrainingJob[]
+  inferences       InferenceJob[]
+  assets           Asset[]
+  collections      Collection[]
+  workflows        Workflow[]
+  workflowRuns     WorkflowRun[]
+  canvases         CanvasProject[]
+  apiKeys          ApiKey[]
+  webhooks         WebhookEndpoint[]
+}
+
+model OrganizationMember {
+  id       String   @id @default(cuid())
+  teamId   String
+  userId   String
+  role     String   @default("admin") // admin | editor | reader
+  joinedAt DateTime @default(now())
+
+  team Organization @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  user User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([teamId, userId])
+}
+
+model Project {
+  id             String   @id @default(cuid())
+  teamId         String
+  name           String
+  description    String   @default("Main Game Production Workspace")
+  privacy        String   @default("private") // private | workspace | public
+  guardrailsJson String   @default("{\"bannedTerms\":[],\"requiredStyleSuffix\":\"\",\"minResolution\":512,\"requireQualityGate\":false}")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  team         Organization       @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  models       AiModel[]
+  trainings    ModelTrainingJob[]
+  inferences   InferenceJob[]
+  assets       Asset[]
+  collections  Collection[]
+  workflows    Workflow[]
+  workflowRuns WorkflowRun[]
+  canvases     CanvasProject[]
+  webhooks     WebhookEndpoint[]
+
+  @@index([teamId])
+}
+
+model OscuBucket {
+  id             String    @id @default(cuid())
+  teamId         String
+  name           String
+  totalUnits     Int
+  remainingUnits Int
+  priority       Int       @default(1)
+  expiresAt      DateTime?
+  createdAt      DateTime  @default(now())
+
+  team Organization @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@index([teamId])
+}
+
+model OscuTransaction {
+  id           String   @id @default(cuid())
+  teamId       String
+  projectId    String?
+  userId       String?
+  amount       Int
+  balanceAfter Int
+  reason       String // INITIAL_GRANT | INFERENCE | TRAINING | WORKFLOW_RUN | TOP_UP
+  description  String
+  referenceId  String?
+  createdAt    DateTime @default(now())
+
+  team Organization @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  user User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([teamId])
+  @@index([createdAt])
+}
+
+// ============================================================================
+// AI MODELS, TRAININGS & COMPOSITIONS
+// ============================================================================
+
+model AiModel {
+  id              String   @id @default(cuid())
+  teamId          String?
+  projectId       String?
+  authorId        String?
+  slug            String
+  name            String
+  description     String
+  type            String   @default("lora") // base | lora | composed | utility
+  modality        String   @default("image") // image | video | 3d | audio | text | texture | skybox | edit
+  baseModelFamily String   @default("FLUX.1") // FLUX.1 | Gemini | Seedance | Kling | Hunyuan3D | Scenario | Topaz | PhotoRoom
+  category        String   @default("Characters")
+  privacy         String   @default("private") // private | public
+  triggerWord     String?
+  thumbnailUrl    String?
+  tagsJson        String   @default("[]")
+  componentsJson  String   @default("[]") // [{ modelId, name, weight }]
+  oscuCost        Int      @default(10)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  team    Organization? @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  project Project?      @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  author  User?         @relation(fields: [authorId], references: [id], onDelete: SetNull)
+
+  @@index([teamId])
+  @@index([type])
+  @@index([modality])
+}
+
+model ModelTrainingJob {
+  id               String    @id @default(cuid())
+  teamId           String
+  projectId        String
+  userId           String
+  name             String
+  trainingClass    String    @default("Style") // Style | Character | Prop | Environment | UI
+  baseModel        String    @default("FLUX.1 Dev")
+  triggerWord      String
+  status           String    @default("COMPLETED") // PREPARING | TRAINING | COMPLETED | FAILED
+  epochs           Int       @default(12)
+  currentEpoch     Int       @default(12)
+  learningRate     Float     @default(0.0004)
+  datasetScore     Int       @default(92)
+  datasetItemsJson String    @default("[]")
+  metricsJson      String    @default("[]")
+  outputModelId    String?
+  oscuCost         Int       @default(250)
+  createdAt        DateTime  @default(now())
+  completedAt      DateTime?
+
+  team    Organization @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  project Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([teamId, projectId])
+}
+
+// ============================================================================
+// MULTI-MODAL INFERENCES, ASSETS & COLLECTIONS
+// ============================================================================
+
+model InferenceJob {
+  id              String    @id @default(cuid())
+  teamId          String
+  projectId       String
+  userId          String
+  modality        String // image | video | 3d | audio | text | texture | skybox | upscale | remove-bg | vectorize | pixelate
+  modelId         String
+  modelName       String
+  prompt          String
+  negativePrompt  String    @default("")
+  parametersJson  String    @default("{}")
+  status          String    @default("COMPLETED") // QUEUED | RUNNING | COMPLETED | FAILED
+  oscuCost        Int       @default(10)
+  durationMs      Int       @default(420)
+  createdAt       DateTime  @default(now())
+  completedAt     DateTime?
+
+  team    Organization @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  project Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  assets  Asset[]
+
+  @@index([teamId, projectId])
+  @@index([modality])
+  @@index([createdAt])
+}
+
+model Asset {
+  id                 String    @id @default(cuid())
+  teamId             String
+  projectId          String
+  userId             String
+  inferenceJobId     String?
+  modality           String // image | video | 3d | audio | text | skybox | texture | canvas
+  toolBadge          String    @default("Txt2Img") // Txt2Img | Img2Video | Img23d | AudioSynth | TextLLM | PBRTexture | Skybox360 | Upscale | RemoveBG | Vectorize | Pixelate | CanvasExport
+  title              String
+  prompt             String
+  negativePrompt     String    @default("")
+  modelId            String
+  modelName          String
+  mimeType           String    @default("image/svg+xml")
+  width              Int       @default(1024)
+  height             Int       @default(1024)
+  durationSec        Int?
+  seed               Int       @default(1000)
+  dataUrl            String
+  artifactPayload    String    @default("")
+  tagsJson           String    @default("[]")
+  metadataJson       String    @default("{}")
+  publishedToExplore Boolean   @default(false)
+  trashedAt          DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  team             Organization      @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  project          Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user             User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  inferenceJob     InferenceJob?     @relation(fields: [inferenceJobId], references: [id], onDelete: SetNull)
+  collectionAssets CollectionAsset[]
+
+  @@index([teamId, projectId])
+  @@index([modality])
+  @@index([publishedToExplore])
+  @@index([trashedAt])
+  @@index([createdAt])
+}
+
+model Collection {
+  id          String   @id @default(cuid())
+  teamId      String
+  projectId   String
+  userId      String
+  name        String
+  description String   @default("")
+  privacy     String   @default("private") // private | public
+  coverUrl    String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  team    Organization      @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  project Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items   CollectionAsset[]
+
+  @@index([teamId, projectId])
+}
+
+model CollectionAsset {
+  id           String   @id @default(cuid())
+  collectionId String
+  assetId      String
+  addedAt      DateTime @default(now())
+
+  collection Collection @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+  asset      Asset      @relation(fields: [assetId], references: [id], onDelete: Cascade)
+
+  @@unique([collectionId, assetId])
+}
+
+// ============================================================================
+// VISUAL NODE-BASED WORKFLOWS, WORKFLOW APPS & INFINITE CANVAS
+// ============================================================================
+
+model Workflow {
+  id             String   @id @default(cuid())
+  teamId         String
+  projectId      String
+  authorId       String
+  name           String
+  description    String   @default("")
+  category       String   @default("Characters")
+  privacy        String   @default("private") // private | public
+  isPublishedApp Boolean  @default(true)
+  beforeImageUrl String?
+  afterImageUrl  String?
+  nodesJson      String   @default("[]")
+  edgesJson      String   @default("[]")
+  inputKeysJson  String   @default("[]")
+  nodeGroupsJson String   @default("[]")
+  oscuEstimate   Int      @default(20)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  team    Organization  @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  project Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  author  User          @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  runs    WorkflowRun[]
+
+  @@index([teamId, projectId])
+  @@index([isPublishedApp])
+}
+
+model WorkflowRun {
+  id                 String    @id @default(cuid())
+  workflowId         String
+  teamId             String
+  projectId          String
+  userId             String
+  status             String    @default("COMPLETED") // RUNNING | WAITING_APPROVAL | COMPLETED | FAILED
+  inputsJson         String    @default("{}")
+  nodeStatesJson     String    @default("{}")
+  outputAssetIdsJson String    @default("[]")
+  oscuSpent          Int       @default(20)
+  createdAt          DateTime  @default(now())
+  completedAt        DateTime?
+
+  workflow Workflow     @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  team     Organization @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  project  Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user     User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([workflowId])
+  @@index([teamId, projectId])
+}
+
+model CanvasProject {
+  id           String   @id @default(cuid())
+  teamId       String
+  projectId    String
+  userId       String
+  name         String   @default("Untitled Canvas")
+  width        Int      @default(1920)
+  height       Int      @default(1080)
+  zoom         Float    @default(1.0)
+  panX         Float    @default(0)
+  panY         Float    @default(0)
+  liveMode     Boolean  @default(false)
+  frameJson    String   @default("{\"x\":240,\"y\":120,\"width\":512,\"height\":512,\"prompt\":\"Isometric arcane sanctuary\",\"modelId\":\"model_flux-1-dev\"}")
+  layersJson   String   @default("[{\"id\":\"layer_base\",\"name\":\"Base Sketch\",\"visible\":true,\"locked\":false,\"opacity\":1}]")
+  strokesJson  String   @default("[]")
+  thumbnailUrl String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  team    Organization @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  project Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([teamId, projectId])
+}
+
+// ============================================================================
+// API KEYS & WEBHOOK ENDPOINTS
+// ============================================================================
+
+model ApiKey {
+  id         String    @id @default(cuid())
+  teamId     String
+  userId     String
+  name       String
+  keyPrefix  String
+  keyHash    String    @unique
+  scopesJson String    @default("[\"inferences:write\",\"assets:read\",\"workflows:run\",\"models:read\"]")
+  lastUsedAt DateTime?
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+
+  team Organization @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  user User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([teamId])
+}
+
+model WebhookEndpoint {
+  id              String    @id @default(cuid())
+  teamId          String
+  projectId       String
+  url             String
+  secret          String
+  eventsJson      String    @default("[\"inference.completed\",\"training.completed\",\"workflow.completed\"]")
+  active          Boolean   @default(true)
+  lastTriggeredAt DateTime?
+  lastStatus      Int?
+  createdAt       DateTime  @default(now())
+
+  team    Organization @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  project Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([teamId, projectId])
+}
